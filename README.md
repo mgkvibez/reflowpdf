@@ -28,6 +28,8 @@ file.
 parentheses, arrays, dicts, operators, comments, byte offsets, and text-show grouping for `Tj`/`TJ`/`'`/`"`). There is no
 xref parsing, no object model, no editor and no reflow yet.
 
+**Tests:** 8
+
 ```bash
 npm ci && npm run verify
 ```

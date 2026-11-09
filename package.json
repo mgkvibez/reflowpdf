@@ -4,6 +4,13 @@
   "description": "Edit real PDFs: retype a paragraph and reflow it inside the existing column",
   "type": "module",
   "license": "MIT",
-  "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit", "verify": "npm run typecheck && npm test" },
-  "devDependencies": { "typescript": "^5.6.0", "vitest": "^2.1.0" }
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "verify": "npm run typecheck && npm test && node tools/check-test-count.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
 }
