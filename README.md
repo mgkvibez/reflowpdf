@@ -22,13 +22,23 @@ file.
 5. **Fonts**: reuse the embedded subset; refuse rather than silently substituting a different face.
 6. **Round-trip proof**: a document opened, edited and saved must render pixel-comparably everywhere except the edit.
 
+## Text placement
+
+`positionedRuns` walks the stream tracking the text matrix (`BT`, `Tm`, `Td`, `TD`, `T*`, `TL`, `Tf`) and returns one run
+per showing operator with its origin, font and size, plus the operator's byte offset so the run can be rewritten in place.
+A `TJ` array is one run, because its pieces share an origin and rewriting them separately loses the kerning anchor.
+
+Two honest limits: glyph advance is approximated at one em per glyph until the font's `/Widths` is read, and a scaled or
+rotated text matrix is refused by name rather than measured wrongly, since a wrong x puts the replacement text in the
+wrong column.
+
 ## Status
 
 **Stage 0: scaffolding.** The content-stream lexer exists and is tested (numbers, names, strings with escapes and nested
 parentheses, arrays, dicts, operators, comments, byte offsets, and text-show grouping for `Tj`/`TJ`/`'`/`"`). There is no
 xref parsing, no object model, no editor and no reflow yet.
 
-**Tests:** 8
+**Tests:** 16
 
 ```bash
 npm ci && npm run verify
