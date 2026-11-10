@@ -146,11 +146,33 @@ the positions read back by an independent reader, including the following text p
 justification and hyphenation, moving graphics with the text, and font subset reuse for characters that are not already in
 the file.
 
-**Tests:** 85
+**Tests:** 89
 
 ```bash
 npm ci && npm run verify
 ```
+
+## The round trip, read by a library that shares no code with this one
+
+`tests/roundtrip.test.ts` runs the whole path on the real article: read it, reflow a paragraph, save, and read the saved
+bytes again. The second reader is pypdf, so the questions are the ones a person would ask of the file rather than the ones
+this code knows how to ask: it opens, it still has one page, it contains the sentence that was written, and the sentence
+that was replaced is not also still there.
+
+Three details are worth stating, because they are where a test like this goes wrong quietly:
+
+1. The line spacing comes from the file. The test measures the distance between the article's own baselines and passes
+   that as `leading`, rather than passing a plausible 14 and then agreeing with itself about the spacing.
+2. Whitespace is flattened before comparing text. pypdf breaks lines where the text is wrapped, so a substring check
+   against the raw extraction fails on text that is perfectly correct.
+3. The replacement text is deliberately unlike anything in the article. The fixture already contains "The quick brown
+   fox", so a replacement that began with those words appeared twice in the saved file and the count meant nothing. That
+   was the first version of this test and it was wrong.
+
+The last check reads the saved file a second time, reflows it again, and saves that: a save that merely produces a valid
+PDF passes every other test here while being unreadable to the next edit.
+
+It skips when python and pypdf are not installed, because a cold checkout runs `npm run verify` with no Python at all.
 
 ## Non-goals
 
