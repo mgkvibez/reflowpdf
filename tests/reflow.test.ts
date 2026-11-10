@@ -129,14 +129,69 @@ describe("reflowing a paragraph", () => {
     expect(() => reflowParagraph(twoLines, 0, "aa", { fonts: halfEm, lineCount: 0 })).toThrow(/at least one line/);
   });
 
-  it("reports how much room is left under the paragraph, so a caller knows it grew into its neighbour", () => {
+  it("reports how much room is left under the paragraph, which is what decides whether anything has to move", () => {
     const stream = "BT /F1 10 Tf 1 0 0 1 100 700 Tm (aaaaa) Tj 0 -14 Td (aaaaa) Tj 0 -14 Td (aaaaa) Tj ET";
-    // one line of text, one leading of room under it, so growing by a line leaves exactly no slack
-    const grown = reflowParagraph(stream, 0, "aa aa", { fonts: halfEm, lineCount: 1, leading: 14 });
+    // one line of text with one leading of room under it, so growing by a line leaves exactly no slack
+    const grown = reflowParagraph(stream, 0, "aa aa", { fonts: halfEm, lineCount: 1, leading: 14, pushFollowing: false });
     expect(grown.clearance).toBe(0);
-    const tooBig = reflowParagraph(stream, 0, "aa aa aa aa aa aa", { fonts: halfEm, lineCount: 1, leading: 14 });
+    const tooBig = reflowParagraph(stream, 0, "aa aa aa aa aa aa", {
+      fonts: halfEm,
+      lineCount: 1,
+      leading: 14,
+      pushFollowing: false,
+    });
     expect(tooBig.lines).toHaveLength(3);
     expect(tooBig.clearance).toBe(-28);
+    expect(tooBig.pushedRuns).toBe(0);
+    expect(tooBig.pushedBy).toBe(0);
+  });
+
+  it("pushes the text below down by the shortfall, and not by the whole growth", () => {
+    const roomy = "BT /F1 10 Tf 1 0 0 1 100 700 Tm (aaaaa) Tj ET BT /F1 10 Tf 1 0 0 1 100 640 Tm (zzz) Tj ET";
+    const grown = reflowParagraph(roomy, 0, "aa aa aa", { fonts: halfEm, lineCount: 1, leading: 14 });
+    expect(grown.lines).toEqual(["aa aa", "aa"]);
+    // 32 points of slack against a leading of 14: the paragraph fits, so nothing below moves
+    expect(grown.clearance).toBe(32);
+    expect(grown.pushedRuns).toBe(0);
+    expect(runsOf(grown.stream, halfEm).map((run) => run.y)).toEqual([700, 686, 640]);
+
+    const tight = "BT /F1 10 Tf 1 0 0 1 100 700 Tm (aaaaa) Tj ET BT /F1 10 Tf 1 0 0 1 100 686 Tm (zzz) Tj ET";
+    const pushed = reflowParagraph(tight, 0, "aa aa aa", { fonts: halfEm, lineCount: 1, leading: 14 });
+    // the paragraph grew by 14 into a gap of 14, so the line below moves by 14 to keep its own leading
+    expect(pushed.pushedBy).toBe(14);
+    expect(pushed.pushedRuns).toBe(1);
+    const after = runsOf(pushed.stream, halfEm);
+    expect(after.map((run) => [run.text, run.y])).toEqual([
+      ["aa aa", 700],
+      ["aa", 686],
+      ["zzz", 672],
+    ]);
+    expect(pushed.clearance).toBe(-14);
+  });
+
+  it("keeps a relative move after the block meaning what it meant, by restoring the line matrix", () => {
+    const stream = "BT /F1 10 Tf 1 0 0 1 100 700 Tm (aaaaa) Tj 0 -14 Td (zzz) Tj ET";
+    const result = reflowParagraph(stream, 0, "aa aa aa", {
+      fonts: halfEm,
+      lineCount: 1,
+      leading: 14,
+      pushFollowing: false,
+    });
+    expect(result.lines).toEqual(["aa aa", "aa"]);
+    const after = runsOf(result.stream, halfEm);
+    // the Td after the block is still measured from the block's last original baseline. Without the restore it would be
+    // measured from the new last line, and every relative move after a reflow would land a line off.
+    expect(after.at(-1)!.text).toBe("zzz");
+    expect(after.at(-1)!.y).toBe(686);
+  });
+
+  it("refuses to reflow over text it cannot move, and only when a move is actually needed", () => {
+    const tight = "BT /F1 10 Tf 1 0 0 1 100 700 Tm (aaaaa) Tj 0 -14 Td (zzz) Tj ET";
+    expect(() => reflowParagraph(tight, 0, "aa aa aa", { fonts: halfEm, lineCount: 1, leading: 14 })).toThrow(
+      /cannot be moved/,
+    );
+    // the same file is fine when the paragraph does not need the room, because then nothing has to move
+    expect(reflowParagraph(tight, 0, "aa", { fonts: halfEm, lineCount: 1, leading: 14 }).pushedRuns).toBe(0);
   });
 });
 
@@ -199,18 +254,38 @@ describe("reflow against a real PDF", () => {
     expect(Math.max(...guessed.advances)).toBeGreaterThan(realWidth * 1.5);
   });
 
-  it("says plainly when the reflowed paragraph runs into the text under it", async () => {
+  it("keeps the page in order by moving the text under a grown paragraph, instead of leaving it overlapped", async () => {
     const { page, fonts, runs } = await open();
     const index = runs.findIndex((run) => run.text.startsWith("The rest of this line"));
     const long =
       "The rest of this line has to stay in its column, and now it is long enough that it needs to break twice.";
-    const result = reflowParagraph(page.content, index, long, {
+    const result = reflowParagraph(page.content, index, long, { fonts: fonts.widths, lineCount: 1, leading: 30 });
+    // the paragraph grew by two lines into a gap of one, so the shortfall is 60 points and that is what moves
+    expect(result.clearance).toBe(-60);
+    expect(result.pushedBy).toBe(60);
+    expect(result.pushedRuns).toBe(2);
+
+    const after = positionedRuns(tokenize(result.stream), fonts.widths);
+    const moved = after.filter((run) => Math.abs(run.y - 640) < 1e-9);
+    expect(moved.map((run) => run.text).sort()).toEqual(["left run", "right run"]);
+    // nothing is left where it used to be, and the three new lines sit above the pair that moved
+    expect(after.some((run) => Math.abs(run.y - 700) < 1e-9 && run.text === "left run")).toBe(false);
+  });
+
+  it("accepts the overlap only when the caller says so, and then says so back", async () => {
+    const { page, fonts, runs } = await open();
+    const index = runs.findIndex((run) => run.text.startsWith("The rest of this line"));
+    const long =
+      "The rest of this line has to stay in its column, and now it is long enough that it needs to break twice.";
+    const unpushed = reflowParagraph(page.content, index, long, {
       fonts: fonts.widths,
       lineCount: 1,
       leading: 30,
+      pushFollowing: false,
     });
-    // the paragraph grew by two lines into a gap of one, so it overlaps the line below instead of hiding that
-    expect(result.clearance).toBeLessThan(0);
-    expect(result.clearance).toBe(-60);
+    expect(unpushed.clearance).toBe(-60);
+    expect(unpushed.pushedRuns).toBe(0);
+    const after = positionedRuns(tokenize(unpushed.stream), fonts.widths);
+    expect(after.some((run) => Math.abs(run.y - 700) < 1e-9 && run.text === "left run")).toBe(true);
   });
 });

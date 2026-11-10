@@ -23,7 +23,8 @@ export class EditError extends Error {
   }
 }
 
-interface TextEdit {
+/** One splice into the original stream: replace `[start, end)` with `replacement`. */
+export interface TextEdit {
   readonly start: number;
   readonly end: number;
   readonly replacement: string;
@@ -39,7 +40,7 @@ function formatNumber(value: number): string {
   return fixed === "-0" ? "0" : fixed;
 }
 
-function applyEdits(stream: string, edits: readonly TextEdit[]): string {
+export function applyEdits(stream: string, edits: readonly TextEdit[]): string {
   const sorted = [...edits].sort((a, b) => b.start - a.start);
   let out = stream;
   let previousStart = Number.POSITIVE_INFINITY;
@@ -161,6 +162,42 @@ export function showEnd(tokens: readonly Token[], run: PositionedRun): number {
 /** Formats a coordinate the way this editor writes numbers: four decimals, no trailing zeros. */
 export function formatCoordinate(value: number): string {
   return formatNumber(value);
+}
+
+/**
+ * The splice that moves a run to an absolute y, for pushing later content out of a grown paragraph's way.
+ *
+ * Only `Tm` is adjustable, and the reason is arithmetic rather than laziness: `Td` and `TD` are relative to the line
+ * matrix, which the previous move already changed, so adding a delta to one of them would drag every run after it in the
+ * same text object by the same amount and twice for the second run. `T*` moves by a leading that is shared the same way.
+ * A run positioned by any of those is refused by name, so a caller can decide between accepting the overlap and
+ * reflowing a different paragraph.
+ */
+export function moveRunDown(tokens: readonly Token[], run: PositionedRun, newY: number): TextEdit {
+  const show = showOperatorAt(tokens, run.offset);
+  const showIndex = tokens.indexOf(show.operator);
+
+  for (let index = showIndex - 1; index >= 0; index -= 1) {
+    const token = tokens[index];
+    if (token === undefined || token.kind !== "operator" || !POSITIONING.has(token.value)) continue;
+    let first = index;
+    while (first > 0 && tokens[first - 1]?.kind !== "operator") first -= 1;
+    const numbers = tokens.slice(first, index).filter((arg) => arg.kind === "number") as (Token & { kind: "number" })[];
+
+    if (token.value === "Tm") {
+      const yToken = numbers[5];
+      if (yToken === undefined) throw new EditError("Tm with fewer than six operands");
+      return { start: yToken.offset, end: yToken.offset + yToken.raw.length, replacement: formatNumber(newY) };
+    }
+    if (token.value === "Td" || token.value === "TD" || token.value === "T*") {
+      throw new EditError(
+        `the run at byte ${run.offset} is placed by ${token.value}, which moves relative to everything before it, so ` +
+          "shifting it would move the rest of its text object too",
+      );
+    }
+    if (token.value === "BT") break;
+  }
+  throw new EditError(`no positioning operator before the run at byte ${run.offset}`);
 }
 
 /** Rewrites one run's text in place and returns the new stream. */

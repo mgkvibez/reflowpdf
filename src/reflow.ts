@@ -7,14 +7,27 @@
  * with measured advances, which is why this module takes the page's font widths. And the result has to go back into the
  * stream as show operators, which is why the replacement is one splice covering exactly the block and nothing else.
  *
+ * When the paragraph grows, the text below it is pushed down by the same amount, because a reflow that leaves the page
+ * overlapping is not a reflow. Only absolute `Tm` placement can be adjusted, so a file that positions its later text with
+ * relative moves is refused by name instead of half-moved.
+ *
  * What this does not do: hyphenate (a word wider than the column overflows rather than being split, because a hyphen
  * that is not in the font produces a missing glyph), justify (the file's own spacing operators are not modelled, so every
  * line is set flush left at the column edge), or mix fonts inside one paragraph (a block with two fonts is refused by
- * name, since reflow would have to decide which one the new text is in).
+ * name, since reflow would have to decide which one the new text is in). It moves text, not graphics: a rectangle or an
+ * image below a grown paragraph stays where it was.
  */
 
 import { tokenize } from "./content-stream.js";
-import { escapePdfText, formatCoordinate, positioningStart, showEnd } from "./edit.js";
+import {
+  applyEdits,
+  escapePdfText,
+  formatCoordinate,
+  moveRunDown,
+  positioningStart,
+  showEnd,
+  type TextEdit,
+} from "./edit.js";
 import type { FontWidths } from "./fonts.js";
 import { positionedRuns, type PositionedRun } from "./text-layout.js";
 
@@ -38,6 +51,14 @@ export interface ReflowOptions {
   readonly leading?: number;
   /** The page's font widths. Without them the break is made with one em per glyph and says so. */
   readonly fonts?: ReadonlyMap<string, FontWidths>;
+  /**
+   * Move the text below out of the way when the paragraph grows or shrinks. Default true.
+   *
+   * Passing false keeps the rest of the page where it is and accepts the overlap, which is what a caller wants when it is
+   * about to re-lay the whole page itself. Naming it false is the only way to get an overlapping result: if the text
+   * below cannot be moved, the reflow refuses rather than returning a document it knows is broken.
+   */
+  readonly pushFollowing?: boolean;
 }
 
 export interface ReflowResult {
@@ -51,12 +72,16 @@ export interface ReflowResult {
   readonly breakExact: boolean;
   /** Lines the block had before the reflow, so a caller can tell whether the paragraph grew or shrank. */
   readonly replacedLines: number;
+  /** Runs further down the page that were moved to make room, and zero when nothing needed to move. */
+  readonly pushedRuns: number;
+  /** How far those runs moved, in points, downwards. Zero when the paragraph had room to grow into. */
+  readonly pushedBy: number;
   /**
    * Space left between the reflowed paragraph and the line under it, measured in lines: the gap minus one leading.
    *
    * Zero means the next line sits exactly one leading below the paragraph's last baseline, which is normal. Negative
-   * means the paragraph grew into it. That is reported rather than prevented: the paragraph reflowed correctly, and
-   * moving everything below it is a separate edit this function does not make. Null when nothing sits below.
+   * means the reflowed block needs that many points it does not have, which is the amount `pushedBy` moves the text below
+   * by, or the overlap that is left when `pushFollowing` is false. Null when nothing sits below.
    */
   readonly clearance: number | null;
 }
@@ -164,6 +189,7 @@ export function reflowParagraph(
   }
 
   const column = inferColumn(block);
+  const blockBottom = block.at(-1)![0]!.y;
   const widths = target.widths;
   const measure = (candidate: string): number =>
     widths === undefined ? candidate.length * fontSize : widths.advance(candidate, fontSize);
@@ -174,24 +200,58 @@ export function reflowParagraph(
   const leading = leadingOf(block, options.leading);
   const lowest = target.y - (lines.length - 1) * leading;
   const clearance = clearanceBelow(groups, block, lowest, leading);
+  // Only the shortfall moves, not the whole growth: a paragraph that grows into slack it already had disturbs nothing.
+  const shortfall = clearance === null ? 0 : Math.max(0, -clearance);
+  const pushing = (options.pushFollowing ?? true) && shortfall > 0;
+  const pushedBy = pushing ? shortfall : 0;
   const start = positioningStart(tokens, blockRuns[0]!);
   const end = showEnd(tokens, blockRuns.at(-1)!);
-  const replacement = lines
-    .map(
+  // The block's replacement ends by restoring the text line matrix to where the block left it. Without that, a
+  // following `Td 0 -14` inside the same text object would be measured from the new last line instead of the old one, and
+  // every relative move after a reflow would silently land a line or two off. Absolute `Tm` for each new line plus one
+  // restore keeps the operators after the block meaning exactly what they meant before.
+  const lastLine = block.at(-1)!;
+  const restore = `1 0 0 1 ${formatCoordinate(lastLine[0]!.x)} ${formatCoordinate(lastLine[0]!.y)} Tm`;
+  const replacement = [
+    ...lines.map(
       (line, index) =>
         `1 0 0 1 ${formatCoordinate(column.left)} ${formatCoordinate(target.y - index * leading)} Tm ` +
         `(${escapePdfText(line)}) Tj`,
-    )
-    .join("\n");
+    ),
+    restore,
+  ].join("\n");
+
+  // Everything below the paragraph moves by however much is needed to keep one leading between them. Only absolute `Tm`
+  // positions are adjustable, so a file that places its later text with relative moves gets a refusal rather than a
+  // half-moved page.
+  const edits: TextEdit[] = [{ start, end, replacement }];
+  let pushedRuns = 0;
+  if (pushing) {
+    for (const run of runs) {
+      if (run.y >= blockBottom - 0.01) continue;
+      try {
+        edits.push(moveRunDown(tokens, run, run.y - pushedBy));
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new ReflowError(
+          `the text below this paragraph cannot be moved, so the reflow would overlap it: ${reason}. Pass ` +
+            "`pushFollowing: false` to accept the overlap, or reflow a paragraph whose followers are placed absolutely.",
+        );
+      }
+      pushedRuns += 1;
+    }
+  }
 
   return {
-    stream: `${stream.slice(0, start)}${replacement}${stream.slice(end)}`,
+    stream: applyEdits(stream, edits),
     lines,
     advances,
     column,
     breakExact: widths !== undefined && lines.every((line) => widths.measuresExactly(line)),
     replacedLines: block.length,
     clearance,
+    pushedRuns,
+    pushedBy,
   };
 }
 
