@@ -5,13 +5,13 @@
  * stream loses everything the editor did not model (colour operators, marked content, the exact numeric formatting),
  * and the point of this project is that the untouched 99% of a document stays untouched.
  *
- * The advance model is the same one `positionedRuns` uses: one em per glyph until `/Widths` is read. It is an
- * approximation, and it is the honest one available at this stage, because the alternative is a shift computed from a
- * font metric table this repository does not parse yet. When `/Widths` arrives, `advanceOf` is the only thing that
- * changes, and every caller stays correct.
+ * Advance comes from the run: the font's `/Widths` when the caller read them, one em per glyph when it did not. This
+ * module needs no branch for that, because `advanceOf` asks the run and the run knows whether its number was measured.
+ * That is the one thing `/Widths` was always going to be able to change without touching a caller, and it did.
  */
 
 import { tokenize, type Token } from "./content-stream.js";
+import type { FontWidths } from "./fonts.js";
 import type { PdfDocument, PdfPage } from "./pdf.js";
 import { PdfError, appendRevision, streamBody } from "./pdf.js";
 import { positionedRuns, type PositionedRun } from "./text-layout.js";
@@ -140,8 +140,15 @@ export function moveRunTo(stream: string, run: PositionedRun, newX: number): str
   return applyEdits(stream, [moveEdit(tokenize(stream), run, newX)]);
 }
 
-/** How far the pen moves for a run's text, under the one-em-per-glyph model `positionedRuns` documents. */
+/**
+ * How far the pen moves for a run's text.
+ *
+ * Measured from the font when the run carries its `/Widths`, and one em per glyph when it does not, which is exactly the
+ * distinction `PositionedRun.advanceExact` reports. Shifting the rest of a line after an edit is only as right as this
+ * number, which is why the fallback is not silent.
+ */
 export function advanceOf(run: PositionedRun, text: string = run.text): number {
+  if (run.widths !== undefined) return run.widths.advance(text, run.fontSize);
   return text.length * run.fontSize;
 }
 
@@ -158,10 +165,18 @@ export interface LineEdit {
  *
  * "The rest of its line" is decided by y, not by stream order: a run is on the line if its baseline is within a
  * hundredth of a point, which is the same tolerance the text grouping uses.
+ *
+ * Pass the page's font widths to shift by a measured distance rather than one em per glyph; `delta` is then exact to the
+ * thousandths the font declares.
  */
-export function editLine(stream: string, runIndex: number, newText: string): LineEdit {
+export function editLine(
+  stream: string,
+  runIndex: number,
+  newText: string,
+  fonts?: ReadonlyMap<string, FontWidths>,
+): LineEdit {
   const tokens = tokenize(stream);
-  const runs = positionedRuns(tokens);
+  const runs = positionedRuns(tokens, fonts);
   const target = runs[runIndex];
   if (target === undefined) throw new EditError(`no run at index ${runIndex}; the page has ${runs.length}`);
   if (target.fontSize <= 0) throw new EditError(`run ${runIndex} has no font size, so its advance cannot be computed`);

@@ -290,6 +290,24 @@ async function inflate(bytes: Uint8Array): Promise<Uint8Array> {
   return out;
 }
 
+/**
+ * The attributes a page inherits from its `/Pages` ancestors, and therefore attributes it can be missing from its own
+ * dictionary. `/Resources` is the one that matters here: a writer that puts fonts on the tree node and not on every
+ * page is common, and reading only the page would find no fonts and fall back to guessing advance on a readable file.
+ */
+const INHERITABLE_KEYS = ["Resources", "MediaBox", "CropBox", "Rotate"] as const;
+
+/** A page dictionary with its inherited attributes filled in, without mutating the cached object. */
+function withInherited(dict: Map<string, PdfValue>, inherited: ReadonlyMap<string, PdfValue>): Map<string, PdfValue> {
+  let merged: Map<string, PdfValue> | null = null;
+  for (const key of INHERITABLE_KEYS) {
+    if (dict.has(key) || !inherited.has(key)) continue;
+    merged ??= new Map(dict);
+    merged.set(key, inherited.get(key) as PdfValue);
+  }
+  return merged ?? dict;
+}
+
 export interface PdfPage {
   readonly index: number;
   readonly dict: Map<string, PdfValue>;
@@ -444,21 +462,26 @@ export class PdfDocument {
     const pagesRef = root.get("Pages");
     if (pagesRef === undefined) throw new PdfError("catalog has no /Pages");
     const collected: PdfPage[] = [];
-    this.walk(pagesRef, collected);
+    this.walk(pagesRef, collected, new Map());
     return collected;
   }
 
-  private walk(node: PdfValue, out: PdfPage[]): void {
+  private walk(node: PdfValue, out: PdfPage[], inherited: ReadonlyMap<string, PdfValue>): void {
     const dict = this.dictionary(node);
     const type = this.resolve(dict.get("Type") as PdfValue);
     const name = type !== null && typeof type === "object" && "kind" in type && type.kind === "name" ? type.name : "";
     if (name === "Page") {
-      out.push({ index: out.length, dict, content: "" });
+      out.push({ index: out.length, dict: withInherited(dict, inherited), content: "" });
       return;
     }
     const kids = this.resolve(dict.get("Kids") as PdfValue);
     if (!Array.isArray(kids)) throw new PdfError("page tree node has neither /Page type nor /Kids");
-    for (const kid of kids) this.walk(kid, out);
+    const next = new Map(inherited);
+    for (const key of INHERITABLE_KEYS) {
+      const value = dict.get(key);
+      if (value !== undefined) next.set(key, value);
+    }
+    for (const kid of kids) this.walk(kid, out, next);
   }
 
   /** Every page's decoded content, concatenated in reading order, with the pages filled in. */

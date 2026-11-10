@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { tokenize } from "../src/content-stream.js";
 import { advanceOf, editLine, escapePdfText, moveRunTo, replaceRunText, saveEditedContent } from "../src/edit.js";
+import { pageFonts } from "../src/fonts.js";
 import { PdfDocument, documentText } from "../src/pdf.js";
 import { positionedRuns } from "../src/text-layout.js";
 
@@ -154,5 +155,65 @@ describe("round trip against a real PDF", () => {
     const [page] = await document.readPages();
     const doctored = { ...page!, dict: new Map(page!.dict).set("Contents", [page!.dict.get("Contents") as never]) };
     expect(() => saveEditedContent(document, doctored, "x")).toThrow(/not a single indirect object/);
+  });
+});
+
+describe("measured advance on a real embedded font", () => {
+  // article-ttf.pdf embeds DejaVu Sans, so the file carries a real /Widths table and a shift can be a measurement rather
+  // than a proportion. ReportLab's own metrics were used for the expected numbers, so they are an outside answer.
+  const ttfFixture = new Uint8Array(readFileSync("tests/fixtures/article-ttf.pdf"));
+
+  const openWithFonts = async () => {
+    const document = await PdfDocument.open(ttfFixture);
+    const [page] = await document.readPages();
+    const fonts = pageFonts(document, page!);
+    const placed = positionedRuns(tokenize(page!.content), fonts.widths);
+    return { document, page: page!, fonts, placed };
+  };
+
+  it("shifts the rest of the line by the width difference the font declares", async () => {
+    const { page, fonts, placed } = await openWithFonts();
+    const index = placed.findIndex((run) => run.text === "left run");
+    const neighbour = index + 1;
+    expect(placed[neighbour]!.text).toBe("right run");
+
+    const edited = editLine(page.content, index, "left run, but longer", fonts.widths);
+    // ReportLab: stringWidth("left run, but longer", DejaVuSans, 11) = 103.7587890625, and "left run" = 39.9716796875
+    expect(edited.delta).toBeCloseTo(103.7587890625 - 39.9716796875, 5);
+    expect(edited.shifted).toBe(1);
+
+    const after = positionedRuns(tokenize(edited.stream), fonts.widths);
+    expect(after[neighbour]!.text).toBe("right run");
+    // the shift is written back as a number with four decimals, so the stored position is the measured one to a ten
+    // thousandth of a point, which is a third of a micrometre on paper
+    expect(after[neighbour]!.x).toBeCloseTo(placed[neighbour]!.x + edited.delta, 3);
+    expect(Math.abs(after[neighbour]!.x - (placed[neighbour]!.x + edited.delta))).toBeLessThanOrEqual(5e-5);
+  });
+
+  it("would have moved the neighbour by 132 points on the fallback, which is the difference between fitting and not", async () => {
+    const { page, fonts, placed } = await openWithFonts();
+    const index = placed.findIndex((run) => run.text === "left run");
+    const guessed = editLine(page.content, index, "left run, but longer");
+    const measured = editLine(page.content, index, "left run, but longer", fonts.widths);
+    expect(guessed.delta).toBeCloseTo((19 - 7) * 11, 6);
+    // off by about 68 points: nearly an inch of paper, which is how a column stops being a column
+    expect(Math.abs(guessed.delta - measured.delta)).toBeGreaterThan(60);
+  });
+
+  it("saves the shift as an incremental update and reads the measured position back out of the file", async () => {
+    const { document, page, fonts, placed } = await openWithFonts();
+    const index = placed.findIndex((run) => run.text === "left run");
+    const neighbour = index + 1;
+    const edited = editLine(page.content, index, "left run, but longer", fonts.widths);
+    const saved = saveEditedContent(document, page, edited.stream);
+
+    expect(saved.slice(0, ttfFixture.length)).toEqual(ttfFixture);
+
+    const reopened = await PdfDocument.open(saved);
+    const [reopenedPage] = await reopened.readPages();
+    const runs = positionedRuns(tokenize(reopenedPage!.content), pageFonts(reopened, reopenedPage!).widths);
+    expect(runs.map((run) => run.text)).toContain("left run, but longer");
+    expect(runs[neighbour]!.text).toBe("right run");
+    expect(Math.abs(runs[neighbour]!.x - (placed[neighbour]!.x + edited.delta))).toBeLessThanOrEqual(5e-5);
   });
 });

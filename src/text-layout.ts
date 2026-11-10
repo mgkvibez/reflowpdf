@@ -12,6 +12,7 @@
  */
 
 import { TEXT_OPERATORS, type Token } from "./content-stream.js";
+import type { FontWidths } from "./fonts.js";
 
 export interface PositionedRun {
   readonly text: string;
@@ -20,6 +21,12 @@ export interface PositionedRun {
   readonly y: number;
   readonly font: string;
   readonly fontSize: number;
+  /** How far the pen moved for `text`, in points: the font's `/Widths` when they were supplied, else one em per glyph. */
+  readonly advance: number;
+  /** False when `advance` is the one-em fallback, so a caller can tell a measurement from an approximation. */
+  readonly advanceExact: boolean;
+  /** The font's widths, when the caller supplied them, so an editor can measure replacement text the same way. */
+  readonly widths?: FontWidths;
   /** Byte offset of the showing operator, so an editor can rewrite this run in place. */
   readonly offset: number;
 }
@@ -56,8 +63,12 @@ function stringsIn(tokens: readonly Token[]): string[] {
  *
  * A `TJ` array produces one run, not one per string: the pieces are part of the same showing operation and must be
  * rewritten together, or the kerning numbers between them lose their anchor.
+ *
+ * `fonts` is the page's `/Widths` table, keyed by the resource name the stream uses (`/F1`). With it, advance is
+ * measured and a later run's origin is exact; without it, advance is one em per glyph and each run says so through
+ * `advanceExact`, because a caller that shifts text has to know whether the number it shifted by was measured.
  */
-export function positionedRuns(tokens: readonly Token[]): PositionedRun[] {
+export function positionedRuns(tokens: readonly Token[], fonts?: ReadonlyMap<string, FontWidths>): PositionedRun[] {
   const runs: PositionedRun[] = [];
   const state: State = { x: 0, y: 0, lineX: 0, lineY: 0, leading: 0, font: "", fontSize: 0, penX: 0 };
   let pending: Token[] = [];
@@ -128,22 +139,35 @@ export function positionedRuns(tokens: readonly Token[]): PositionedRun[] {
     if ((TEXT_OPERATORS as readonly string[]).includes(operator)) {
       const strings = stringsIn(pending);
       if (strings.length > 0) {
+        const text = strings.join("");
+        const widths = fonts?.get(state.font);
+        // Advance the pen across every string in the showing operation, minus the kerning between them. Kerning follows
+        // the spec's sign convention, where a positive array number moves the pen left.
+        let advance = 0;
+        let advanceExact = widths !== undefined;
+        for (const item of pending) {
+          if (item.kind === "string") {
+            const value = (item as { value: string }).value;
+            if (widths === undefined) {
+              advance += value.length * state.fontSize;
+            } else {
+              advance += widths.advance(value, state.fontSize);
+              advanceExact &&= widths.measuresExactly(value);
+            }
+          }
+          if (item.kind === "number") advance -= ((item as { value: number }).value / 1000) * state.fontSize;
+        }
         runs.push({
-          text: strings.join(""),
+          text,
           x: state.x + state.penX,
           y: state.y,
           font: state.font,
           fontSize: state.fontSize,
+          advance,
+          advanceExact,
+          ...(widths === undefined ? {} : { widths }),
           offset: token.offset,
         });
-        // Advance the pen. Glyph widths need the font's /Widths array, which this module does not read yet, so one em
-        // per glyph is the approximation: enough to tell runs apart, not enough to be a typesetter. Kerning follows the
-        // spec's sign convention, where a positive array number moves the pen left.
-        let advance = 0;
-        for (const item of pending) {
-          if (item.kind === "string") advance += (item as { value: string }).value.length * state.fontSize;
-          if (item.kind === "number") advance -= ((item as { value: number }).value / 1000) * state.fontSize;
-        }
         state.penX += advance;
       }
     }
