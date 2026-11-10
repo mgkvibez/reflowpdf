@@ -20,7 +20,8 @@ file.
 2. **Text runs** — done: show-operators grouped into positioned runs with coordinates, font and size.
 3. **Line editing** — done: replace a run's text, shift the rest of the line by the change in advance, save as an
    incremental update.
-4. **Reflow**: infer the column from neighbouring lines, re-break the paragraph, regenerate the show-operators.
+4. **Reflow** — done: infer the column from the paragraph's own lines, re-break the text with measured advances, and
+   regenerate the show operators as one splice. It does not move later content; see the clearance report.
 5. **Fonts** — advance done: `/Widths` is read, so a shift is a measurement. Still missing: reusing the embedded subset
    for characters the file does not already contain, and a missing glyph is refused rather than substituted.
 6. **Round-trip proof** — partly done: the file reopens in an independent reader with the edit in place. Pixel comparison
@@ -57,6 +58,33 @@ Refusals, because a plausible wrong number is worse than an error:
 
 Fonts are also read from the `/Pages` ancestors when a page does not carry `/Resources` itself, which is where real
 writers often put them; reading only the page would find no fonts on a perfectly readable file.
+
+## Reflow
+
+`reflowParagraph(stream, runIndex, newText, { lineCount, leading, fonts })` retypes a paragraph and re-breaks it inside
+the column it already occupies. The column is not in the file, so it is inferred: the left edge the paragraph's lines share,
+and the width of the widest one, which is the only width the document states. The break is greedy, measured with the
+font's `/Widths`, and the result goes back in as one splice from the first line's positioning operands to the last line's
+show operator, so everything outside the paragraph stays byte-identical.
+
+Refusals, each because the alternative is inventing something: a paragraph that mixes fonts or sizes (reflow would have to
+choose which one the new text is in), a one-line paragraph with no `leading` passed (a new line needs a baseline and the
+paragraph states none), a `lineCount` longer than the lines that exist, and a paragraph whose lines are not in reading
+order.
+
+A word wider than the column overflows on its own line rather than being hyphenated, because a hyphen the font does not
+contain is a missing glyph, which is the failure this project exists to avoid. Lines are set flush left for the same kind
+of reason: the file's spacing operators are not modelled, so justification would be a guess.
+
+**What it does not do yet: move the text below.** A paragraph that grows by a line occupies space the next line is
+using, and the report says so instead of hiding it: `clearance` is the gap under the reflowed paragraph in lines, zero
+when the next baseline sits exactly one leading below, negative when the paragraph has grown into it. Pushing subsequent
+content down is the next increment, and it is a different edit from re-breaking a paragraph.
+
+Verified on the embedded-font fixture: the paragraph "The rest of this line has to stay in its column." re-broken into
+three lines with a leading of 30 lands at x = 72 on baselines 730, 700 and 670, and **pypdf**, which shares no code with
+this project, reads exactly those three lines at exactly those positions out of the saved file. Its `clearance` for that
+edit is -60, which is true: the paragraph grew by two lines and the line below it did not move.
 
 ## The file, not just the stream
 
@@ -102,13 +130,14 @@ the code being checked.
 
 ## Status
 
-**Stage 1: you can edit a real PDF and the file stays valid.** Lexer, reader, page tree, chained filters, text placement
+**Stage 2: you can retype a paragraph and it re-breaks in place.** Lexer, reader, page tree, chained filters, text placement
 with measured advance, line editing and incremental-update saving all exist with tests, on two real fixtures: one in
 base-14 fonts where advance is honestly flagged as approximate, and one with DejaVu Sans embedded where it is measured
-against numbers ReportLab computed from the TrueType tables. What is missing is reflow itself (inferring the column and
-re-breaking the paragraph) and font subset reuse for characters the file does not already contain.
+against numbers ReportLab computed from the TrueType tables, and a real paragraph re-breaks inside its own column with
+the positions read back by an independent reader. What is missing is pushing later content when a paragraph grows,
+justification and hyphenation, and font subset reuse for characters the file does not already contain.
 
-**Tests:** 61
+**Tests:** 81
 
 ```bash
 npm ci && npm run verify

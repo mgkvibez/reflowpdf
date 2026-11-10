@@ -130,6 +130,39 @@ function moveEdit(tokens: readonly Token[], run: PositionedRun, newX: number): T
   throw new EditError(`no positioning operator before the run at byte ${run.offset}`);
 }
 
+/**
+ * Byte offset where the operands of the operator that positioned this run begin.
+ *
+ * A reflow replaces a whole block of lines, so it needs the left edge of the first line's positioning group rather than
+ * one number inside it. A run positioned by `BT` itself has no operands, and the offset returned is just past the `BT`,
+ * because a replacement that swallowed the `BT` would sit outside a text object and every reader would reject it.
+ */
+export function positioningStart(tokens: readonly Token[], run: PositionedRun): number {
+  const show = showOperatorAt(tokens, run.offset);
+  const showIndex = tokens.indexOf(show.operator);
+
+  for (let index = showIndex - 1; index >= 0; index -= 1) {
+    const token = tokens[index];
+    if (token === undefined || token.kind !== "operator" || !POSITIONING.has(token.value)) continue;
+    if (token.value === "BT") return token.offset + token.raw.length;
+    let first = index;
+    while (first > 0 && tokens[first - 1]?.kind !== "operator") first -= 1;
+    return (tokens[first] as Token).offset;
+  }
+  throw new EditError(`no positioning operator before the run at byte ${run.offset}`);
+}
+
+/** Byte offset just past this run's showing operator, which is where a block replacement stops. */
+export function showEnd(tokens: readonly Token[], run: PositionedRun): number {
+  const show = showOperatorAt(tokens, run.offset);
+  return show.operator.offset + show.operator.raw.length;
+}
+
+/** Formats a coordinate the way this editor writes numbers: four decimals, no trailing zeros. */
+export function formatCoordinate(value: number): string {
+  return formatNumber(value);
+}
+
 /** Rewrites one run's text in place and returns the new stream. */
 export function replaceRunText(stream: string, run: PositionedRun, newText: string): string {
   return applyEdits(stream, [replacementEdit(tokenize(stream), run, newText)]);
